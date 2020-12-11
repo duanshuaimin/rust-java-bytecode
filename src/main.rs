@@ -45,7 +45,7 @@ pub fn main() {
 	//cv.visit_frame(StackFrame::Full(l0, vec![jtype!(["java/lang/String"]), Int.into()], vec![]));
 	//cv.visit_frame(StackFrame::Full(l1, vec![], vec![]));
 	cv.visit_maxs(5, 5);
-	cv.visit_end();
+	cv.visit_end().unwrap();
 	let mut f = File::create("Main.class").unwrap();
 	let bytes = cw.serialize();
 	f.write_all(&bytes[..]);

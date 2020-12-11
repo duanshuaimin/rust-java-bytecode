@@ -74,12 +74,14 @@ impl Ord for StackFrame {
 }
 
 pub trait CodeVisitor {
+	type EndReturn;
+	
 	fn visit_opcode(&mut self, opcode: Opcode);
 	fn visit_label(&mut self, label: Label);
 	fn visit_maxs(&mut self, max_stack: u16, max_locals: u16);
 	fn visit_exception_handler(&mut self, handler: ExceptionHandler);
 	fn visit_frame(&mut self, frame: StackFrame);
-	fn visit_end(&mut self);
+	fn visit_end(&mut self) -> Self::EndReturn; // some CVs do computations here, return a Result
 }
 
 pub trait GetOffset {

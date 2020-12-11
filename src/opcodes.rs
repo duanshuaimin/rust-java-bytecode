@@ -4,6 +4,8 @@ use crate::{
 };
 use std::cell::Cell;
 use std::rc::Rc;
+use std::cmp::Ordering;
+use std::hash::{Hash, Hasher};
 pub use Opcode::*;
 
 #[derive(PartialEq, Clone, Debug)]
@@ -51,16 +53,29 @@ pub struct Label {
 	pub info: Rc<Cell<Option<LabelInfo>>>
 }
 
-#[derive(Clone, Default, Debug, Copy, PartialEq, Eq)]
+#[allow(clippy::derive_hash_xor_eq)]
+impl Hash for Label {
+	fn hash<H: Hasher>(&self, hasher: &mut H) {
+		self.info.get().hash(hasher);
+	}
+}
+
+impl Ord for Label {
+	fn cmp(&self, other: &Label) -> Ordering {
+		self.info.get().cmp(&other.info.get())
+	}
+}
+
+impl PartialOrd for Label {
+	fn partial_cmp(&self, other: &Label) -> Option<Ordering> {
+		Some(self.cmp(other))
+	}
+}
+
+#[derive(Clone, Default, Debug, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LabelInfo {
 	pub offset: u16,
 	pub opcode_offset: u16
-}
-
-#[derive(Clone, Default, Debug, Copy)]
-pub struct LabelData {
-	pub offset: u16,
-	pub align: bool
 }
 
 impl Label {

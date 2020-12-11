@@ -81,6 +81,7 @@ pub struct CodeWriter {
 }
 
 impl CodeVisitor for CodeWriter {
+	type EndReturn = ();
 	
 	fn visit_maxs(&mut self, max_stack: u16, max_locals: u16) {
 		self.max_stack = max_stack;
@@ -257,6 +258,8 @@ impl MethodVisitor for MethodWriter {
 }
 
 impl CodeVisitor for Rc<RefCell<CodeWriter>> {
+	type EndReturn = ();
+	
 	fn visit_opcode(&mut self, opcode: Opcode) {
 		self.borrow_mut().visit_opcode(opcode);
 	}
