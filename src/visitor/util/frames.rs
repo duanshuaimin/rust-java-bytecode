@@ -7,7 +7,6 @@ use crate::{
 use std::rc::Rc;
 use std::collections::HashMap;
 use std::cell::Cell;
-use std::ops::Sub;
 
 pub struct FrameComputingClassVisitorFactory<T: ClassVisitorFactory> where <<T::ClassVisitorType as ClassVisitor>::MethodVisitorType as MethodVisitor>::CodeVisitorType: GetOffset {
 	delegate: T
@@ -184,11 +183,31 @@ impl<T: CodeVisitor + GetOffset> CodeVisitor for FrameComputingCodeVisitor<T> {
 				stack_effect.push(StackEffect::Pop(2));
 				stack_effect.push(StackEffect::Push(IST::Type(Int.into())));
 			}
-			If(_, _) | IfNull(_) | IfNonNull(_) => {
+			If(_, l) | IfNull(l) | IfNonNull(l) => {
 				stack_effect.push(StackEffect::Pop(1));
+				stack_effect.push(StackEffect::Jump(l.clone()));
 			}
-			IfICmp(_, _) | IfACmp(_, _) => {
+			IfICmp(_, l) | IfACmp(_, l) => {
 				stack_effect.push(StackEffect::Pop(2));
+				stack_effect.push(StackEffect::Jump(l.clone()));
+			}
+			Goto(l) => {
+				stack_effect.push(StackEffect::Jump(l.clone()));
+				stack_effect.push(StackEffect::End);
+			}
+			TableSwitch(l, _, _, ls) => {
+				stack_effect.push(StackEffect::Pop(1));
+				stack_effect.push(StackEffect::Jump(l.clone()));
+				for la in ls {
+					stack_effect.push(StackEffect::Jump(la.clone()));
+				}
+			}
+			LookupSwitch(l, ls) => {
+				stack_effect.push(StackEffect::Pop(1));
+				stack_effect.push(StackEffect::Jump(l.clone()));
+				for (_, la) in ls {
+					stack_effect.push(StackEffect::Jump(la.clone()));
+				}
 			}
 			Return(_) | AThrow => {
 				stack_effect.push(StackEffect::End);
@@ -254,14 +273,6 @@ impl<T: CodeVisitor + GetOffset> CodeVisitor for FrameComputingCodeVisitor<T> {
 			}
 			_ => ()
 		};
-		
-		if let If(_, l) | IfICmp(_, l) | IfACmp(_, l) | Goto(l) | IfNull(l) | IfNonNull(l) = &opcode {
-			self.jumps_to_process.push(l.clone());
-			stack_effect.push(StackEffect::Jump(l.clone()));
-			if let Goto(_) = &opcode {
-				stack_effect.push(StackEffect::End);
-			}
-		}
 		self.stack_effects.push(stack_effect);
 		self.delegate.visit_opcode(opcode)
 	}
@@ -531,11 +542,6 @@ impl JStackState {
 	
 	fn peek(&self, offset: usize) -> Option<&JVerificationType> {
 		self.stack.get(self.stack.len() - 1 - offset)
-	}
-	
-	fn clear(&mut self) {
-		self.stack.clear();
-		self.locals.clear();
 	}
 	
 	fn set_local(&mut self, index: u16, ty: JVerificationType) {

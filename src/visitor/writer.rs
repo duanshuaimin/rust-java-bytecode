@@ -41,6 +41,12 @@ impl ClassVisitorFactory for ClassWriterFactory {
 	}
 }
 
+impl Default for ClassWriterFactory {
+	fn default() -> Self {
+		Self::new()
+	}
+}
+
 impl ClassWriterFactory {
 	pub fn new() -> Self {
 		ClassWriterFactory{}
@@ -193,6 +199,7 @@ impl Attribute for Vec<StackFrame> {
 						buf.put_u8(F_SAME_LOCALS_1_STACK_EXT);
 						buf.put_u16(offset as u16);
 					}
+					t.serialize(buf);
 				}
 				StackFrame::Chop(_, n) => {
 					buf.put_u8(251 - n);
