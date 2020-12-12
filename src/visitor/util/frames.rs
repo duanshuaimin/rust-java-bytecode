@@ -7,6 +7,7 @@ use crate::{
 use std::rc::Rc;
 use std::collections::HashMap;
 use std::cell::Cell;
+use std::ops::Sub;
 
 pub struct FrameComputingClassVisitorFactory<T: ClassVisitorFactory> where <<T::ClassVisitorType as ClassVisitor>::MethodVisitorType as MethodVisitor>::CodeVisitorType: GetOffset {
 	delegate: T
@@ -287,9 +288,7 @@ impl<T: CodeVisitor + GetOffset> CodeVisitor for FrameComputingCodeVisitor<T> {
 		let mut last_label = self.start_label.clone();
 		let mut start_offset = 0;
 		let mut first_block = None;
-		println!("computing frames for labels: {:?}", ls);
 		for label in ls {
-			println!("{:?}", label);
 			let offset = label.info.get().unwrap().opcode_offset as usize;
 			let mut block_opcodes: Vec<StackEffect> = self.stack_effects[start_offset..offset].iter().flatten().cloned().collect();
 			block_opcodes.push(StackEffect::Jump(label.clone()));
@@ -299,19 +298,20 @@ impl<T: CodeVisitor + GetOffset> CodeVisitor for FrameComputingCodeVisitor<T> {
 				effects: block_opcodes,
 				processed: Cell::new(false)
 			});
-			println!("{:?}", block);
 			if first_block.is_none() {
 				first_block = Some(block.clone());
 			}
 			block_map.insert(last_label, block);
 			last_label = label;
 		}
-		let mut statemap = Vec::new();
-		if first_block.is_some() {
-			first_block.unwrap().compute_states(&mut self.initial_state.clone(), &block_map, &mut statemap).unwrap();
+		let mut statemap = FrameStorage {
+			store: HashMap::new()
+		};
+		if let Some(b) = first_block {
+			b.compute_states(&mut self.initial_state.clone(), &block_map, &mut statemap).unwrap();
 		}
-		let mut iter = statemap.iter();
-		let mut last_state = &iter.next().unwrap().1; // first state -- we don't want to visit the frame here, it's automatically inferred by the JVM
+		let mut iter = statemap.store.iter();
+		let mut last_state = iter.next().unwrap().1; // first state -- we don't want to visit the frame here, it's automatically inferred by the JVM
 		for (label, state) in iter {
 			self.delegate.visit_frame(compute_frame(last_state, state, label.clone()));
 			last_state = state;
@@ -329,14 +329,45 @@ fn compute_frame(first_state: &JStackState, second_state: &JStackState, pos: Lab
 		StackFrame::Same(pos)
 	} else if first_state.locals == second_state.locals && second_state.stack.len() == 1 {
 		StackFrame::SameLocals1Stack(pos, second_state.stack[1].clone())
+	} else if locals_cmp_thing(first_state, second_state) && second_state.stack.is_empty() {
+		StackFrame::Chop(pos, (first_state.locals.len() - second_state.locals.len()) as u8)
+	} else if locals_cmp_thing(second_state, first_state) && second_state.stack.is_empty() {
+		StackFrame::Append(pos, second_state.locals[first_state.locals.len()..].into())
 	} else {
 		StackFrame::Full(pos, second_state.locals.clone(), second_state.stack.clone())
+	}
+}
+
+fn locals_cmp_thing(first: &JStackState, second: &JStackState) -> bool {
+	if second.locals.len() < first.locals.len() && first.locals.len() - second.locals.len() <= 3 {
+		for i in 0..second.locals.len() {
+			if second.locals[i] != first.locals[i] {
+				return false;
+			}
+		}
+		true
+	} else {
+		false
 	}
 }
 
 impl<T: CodeVisitor + GetOffset> GetOffset for FrameComputingCodeVisitor<T> {
 	fn get_offset(&self) -> u16 {
 		self.delegate.get_offset()
+	}
+}
+
+struct FrameStorage {
+	store: HashMap<Label, JStackState>
+}
+
+impl FrameStorage {
+	fn put(&mut self, pos: Label, state: JStackState) {
+		self.store.entry(pos).and_modify(|v| {
+			if v.locals.len() > state.locals.len() {
+				*v = state.clone();
+			}
+		}).or_insert(state);
 	}
 }
 
@@ -348,14 +379,13 @@ struct StackBlock {
 }
 
 impl StackBlock {
-	fn compute_states(&self, initial_state: &mut JStackState, label_mapper: &HashMap<Label, Rc<StackBlock>>, state_map: &mut Vec<(Label, JStackState)>) -> Result<(), EffectApplyErr> {
+	fn compute_states(&self, initial_state: &mut JStackState, label_mapper: &HashMap<Label, Rc<StackBlock>>, state_map: &mut FrameStorage) -> Result<(), EffectApplyErr> {
 		if self.processed.replace(true) {
 			return Ok(())
 		}
-		println!("State computed for block @ {:?}: {:?}", self.start, initial_state);
-		state_map.push((self.start.clone(), initial_state.clone()));
+		state_map.put(self.start.clone(), initial_state.clone());
 		for effect in &self.effects {
-			if !effect.apply(initial_state, label_mapper, state_map, self)? {
+			if !effect.apply(initial_state, label_mapper, state_map)? {
 				break;
 			}
 		}
@@ -422,8 +452,7 @@ enum StackEffect {
 }
 
 impl StackEffect {
-	fn apply(&self, state: &mut JStackState, label_mapper: &HashMap<Label, Rc<StackBlock>>, state_map: &mut Vec<(Label, JStackState)>, debug_bl: &StackBlock) -> Result<bool, EffectApplyErr> {
-		//println!("{:?}", state);
+	fn apply(&self, state: &mut JStackState, label_mapper: &HashMap<Label, Rc<StackBlock>>, state_map: &mut FrameStorage) -> Result<bool, EffectApplyErr> {
 		match self {
 			Self::Pop(s) => {
 				for _ in 0..*s {
@@ -452,7 +481,6 @@ impl StackEffect {
 				state.initialize(i, JObjectType::Class(r.clone()))
 			}
 			Self::Jump(l) => {
-				//println!("Jump to {:?} from block {:?}", l, debug_bl);
 				if let Some(block) = label_mapper.get(l) {
 					block.compute_states(&mut state.clone(), label_mapper, state_map)?;
 				} else {
