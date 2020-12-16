@@ -281,9 +281,7 @@ impl<T: CodeVisitor + GetOffset> CodeVisitor for FrameComputingCodeVisitor<T> {
 		self.delegate.visit_label(label)
 	}
 	
-	fn visit_maxs(&mut self, max_stack: u16, max_locals: u16) {
-		self.delegate.visit_maxs(max_stack, max_locals)
-	}
+	fn visit_maxs(&mut self, _max_stack: u16, _max_locals: u16) { }
 	
 	fn visit_exception_handler(&mut self, handler: ExceptionHandler) {
 		self.delegate.visit_exception_handler(handler)
@@ -319,15 +317,19 @@ impl<T: CodeVisitor + GetOffset> CodeVisitor for FrameComputingCodeVisitor<T> {
 			store: HashMap::new()
 		};
 		if let Some(b) = first_block {
-			b.compute_states(&mut self.initial_state.clone(), &block_map, &mut statemap).unwrap();
+			b.compute_states(&mut self.initial_state.clone(), &block_map, &mut statemap)?;
 		}
 		let mut iter = statemap.store.iter();
 		let mut last_state = iter.next().unwrap().1; // first state -- we don't want to visit the frame here, it's automatically inferred by the JVM
+		let mut max_stack = last_state.max_stack;
+		let mut max_locals = last_state.locals.len() as u16;
 		for (label, state) in iter {
 			self.delegate.visit_frame(compute_frame(last_state, state, label.clone()));
 			last_state = state;
+			max_stack = max_stack.max(last_state.max_stack);
+			max_locals = max_locals.max(last_state.locals.len() as u16);
 		}
-		
+		self.delegate.visit_maxs(max_stack, max_locals);
 		self.delegate.visit_end();
 		Ok(())
 	}
@@ -484,12 +486,15 @@ impl StackEffect {
 				}
 			}
 			Self::Initialize(r) => {
-				let i = if let Some(Uninitialized(i)) = state.peek(0) {
-					*i
-				} else {
+				if let Some(Uninitialized(i)) = state.peek(0) {
+					let i = *i;
+					state.initialize(i, Class(r.clone()).into())
+				} else if let Some(UninitializedThis) = state.peek(0) {
+					state.initialize_this(Class(r.clone()).into())
+				} else{
 					return Err(EffectApplyErr::NonUninit)
 				};
-				state.initialize(i, JObjectType::Class(r.clone()))
+				
 			}
 			Self::Jump(l) => {
 				if let Some(block) = label_mapper.get(l) {
@@ -507,14 +512,16 @@ impl StackEffect {
 #[derive(Clone, Debug, PartialEq)]
 struct JStackState {
 	stack: Vec<JVerificationType>,
-	locals: Vec<JVerificationType>
+	locals: Vec<JVerificationType>,
+	max_stack: u16
 }
 
 impl JStackState {
 	fn new() -> Self {
 		JStackState {
 			stack: Vec::new(),
-			locals: Vec::new()
+			locals: Vec::new(),
+			max_stack: 0
 		}
 	}
 	
@@ -534,6 +541,7 @@ impl JStackState {
 	
 	fn push(&mut self, ty: JVerificationType) {
 		self.stack.push(ty);
+		self.max_stack = self.max_stack.max(self.stack.len() as u16);
 	}
 	
 	fn pop(&mut self) -> JVerificationType {
@@ -559,14 +567,22 @@ impl JStackState {
 		}
 	}
 	
-	fn initialize(&mut self, id: u16, to: JObjectType) {
-		let v_to: JVerificationType = to.into();
+	fn initialize(&mut self, id: u16, to: JVerificationType) {
 		for entry in &mut self.stack {
 			if let Uninitialized(off) = entry {
 				if id == *off {
-					*entry = v_to.clone()
+					*entry = to.clone()
 				}
 			}
 		}
 	}
+	
+	fn initialize_this(&mut self, to: JVerificationType) {
+		for entry in &mut self.stack {
+			if let UninitializedThis = entry {
+				*entry = to.clone();
+			}
+		}
+	}
+	
 }
