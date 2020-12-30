@@ -1,5 +1,6 @@
 use crate::{
 	visitor::*,
+	visitor::util::delegate::*,
 	opcodes::*,
 	types::*,
 	implm::util::MaybeRef
@@ -37,9 +38,14 @@ pub struct FrameComputingClassVisitor<T: ClassVisitor> where <T::MethodVisitorTy
 	delegate: T,
 }
 
-impl<T: ClassVisitor> ClassVisitor for FrameComputingClassVisitor<T> where <T::MethodVisitorType as MethodVisitor>::CodeVisitorType: GetOffset {
+impl<T: ClassVisitor> DelegatingClassVisitor for FrameComputingClassVisitor<T> where <T::MethodVisitorType as MethodVisitor>::CodeVisitorType: GetOffset {
+	type DelegateType = T;
 	type MethodVisitorType = FrameComputingMethodVisitor<T::MethodVisitorType>;
 	type FieldVisitorType = T::FieldVisitorType;
+	
+	fn get_delegate(&mut self) -> &mut Self::DelegateType {
+		&mut self.delegate
+	}
 	
 	fn visit_method(&mut self, access: MethodAccess, name: String, ty: MethodType) -> Option<Self::MethodVisitorType> {
 		let s = access.a_static;
@@ -64,8 +70,14 @@ pub struct FrameComputingMethodVisitor<T: MethodVisitor> where T::CodeVisitorTyp
 	is_static: bool
 }
 
-impl<T: MethodVisitor> MethodVisitor for FrameComputingMethodVisitor<T> where T::CodeVisitorType: GetOffset {
+impl<T: MethodVisitor> DelegatingMethodVisitor for FrameComputingMethodVisitor<T> where T::CodeVisitorType: GetOffset {
+	type DelegateType = T;
 	type CodeVisitorType = FrameComputingCodeVisitor<T::CodeVisitorType>;
+	
+	fn get_delegate(&mut self) -> &mut Self::DelegateType {
+		&mut self.delegate
+	}
+	
 	fn visit_code(&mut self) -> Option<Self::CodeVisitorType> {
 		Some(FrameComputingCodeVisitor::new(self.delegate.visit_code()?, &self.ty, if self.is_static {None} else {Some(self.owner.clone())}))
 	}
@@ -101,12 +113,15 @@ impl<T: CodeVisitor + GetOffset> FrameComputingCodeVisitor<T> {
 	}
 }
 
-impl<T: CodeVisitor + GetOffset> CodeVisitor for FrameComputingCodeVisitor<T> {
+impl<T: CodeVisitor + GetOffset> DelegatingCodeVisitor for FrameComputingCodeVisitor<T> {
+	type DelegateType = T;
 	type EndReturn = Result<(), EffectApplyErr>;
+	fn get_delegate(&mut self) -> &mut Self::DelegateType {
+		&mut self.delegate
+	}
+	
 	fn visit_opcode(&mut self, opcode: Opcode) {
 		let mut stack_effect = Vec::new();
-		
-		
 		match &opcode {
 			Const(c) => {
 				stack_effect.push(StackEffect::Push(IST::Type(c.get_verification_type())))
@@ -276,23 +291,14 @@ impl<T: CodeVisitor + GetOffset> CodeVisitor for FrameComputingCodeVisitor<T> {
 		self.stack_effects.push(stack_effect);
 		self.delegate.visit_opcode(opcode)
 	}
-	
-	fn visit_label(&mut self, label: Label) {
-		self.delegate.visit_label(label)
-	}
-	
 	fn visit_maxs(&mut self, _max_stack: u16, _max_locals: u16) { }
-	
-	fn visit_exception_handler(&mut self, handler: ExceptionHandler) {
-		self.delegate.visit_exception_handler(handler)
-	}
 	
 	fn visit_end(&mut self) -> Self::EndReturn {
 		let mut ls = self.jumps_to_process.clone();
 		let mut block_map = HashMap::new();
 		ls.sort();
 		let l = Label::new();
-		self.visit_label(l.clone());
+		CodeVisitor::visit_label(self, l.clone());
 		ls.push(l);
 		let mut last_label = self.start_label.clone();
 		let mut start_offset = 0;

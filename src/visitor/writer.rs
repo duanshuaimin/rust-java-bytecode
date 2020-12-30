@@ -21,7 +21,7 @@ use crate::{
 		AttrEnum
 	},
 	types::*,
-	visitor::*
+	visitor::*,
 };
 use std::{
 	cell::RefCell,
@@ -262,6 +262,21 @@ impl MethodVisitor for MethodWriter {
 			panic!("Code attribute not a code writer!?")
 		}
 	}
+	
+	fn visit_signature(&mut self, sig: String) {
+		let pool = &mut *self.constant_pool.borrow_mut();
+		self.attrs.put("Signature".into(), AttrEnum::Dyn(Box::new(ConstAttr(pool.utf8(sig)))), pool);
+	}
+	
+	fn visit_exceptions(&mut self, exceptions: Vec<ClassRef>) {
+		let mut buf = BytesMut::new();
+		let pool = &mut *self.constant_pool.borrow_mut();
+		buf.put_u16(exceptions.len() as u16);
+		for e in exceptions {
+			buf.put_u16(pool.class_ref(e));
+		}
+		self.attrs.put("Exceptions".into(), AttrEnum::Dyn(Box::new(BytesAttr(buf.freeze()))), pool);
+	}
 }
 
 impl CodeVisitor for Rc<RefCell<CodeWriter>> {
@@ -330,6 +345,62 @@ impl ClassVisitor for ClassWriter {
 		self.fields.push(fw.clone());
 		Some(fw)
 	}
+	
+	fn visit_signature(&mut self, sig: String) {
+		let pool = &mut *self.constant_pool.borrow_mut();
+		self.attrs.put("Signature".into(), AttrEnum::Dyn(Box::new(ConstAttr(pool.utf8(sig)))), pool);
+	}
+	
+	fn visit_inner_classes(&mut self, classes: Vec<InnerClassInfo>) {
+		let pool = &mut *self.constant_pool.borrow_mut();
+		let mut buf = BytesMut::new();
+		buf.put_u16(classes.len() as u16);
+		for class in classes {
+			let inner_info_ptr = pool.class_ref(class.class);
+			let name_ptr = if let Some(n) = class.name {
+				pool.utf8(n)
+			} else {
+				0
+			};
+			let outer_ptr = if let Some(o) = class.outer_class {
+				pool.class_ref(o)
+			} else {
+				0
+			};
+			buf.put_u16(inner_info_ptr);
+			buf.put_u16(outer_ptr);
+			buf.put_u16(name_ptr);
+			buf.put_u16(class.access.as_bitflag());
+		}
+		self.attrs.put("InnerClasses".into(), AttrEnum::Dyn(Box::new(BytesAttr(buf.freeze()))), pool);
+	}
+	
+	fn visit_enclosing_method(&mut self, outer_class: ClassRef, method: Option<(String, MethodType)>) {
+		let pool = &mut *self.constant_pool.borrow_mut();
+		let class_ptr = pool.class_ref(outer_class);
+		let method_ptr = if let Some((n, t)) = method {
+			pool.name_and_type(n, t.descriptor())
+		} else {
+			0
+		};
+		self.attrs.put("EnclosingMethod".into(), AttrEnum::Dyn(Box::new(EnclosingMethodAttr(class_ptr, method_ptr))), pool);
+	}
+	
+	fn visit_sourcefile(&mut self, sourcefile: String) {
+		let pool = &mut *self.constant_pool.borrow_mut();
+		let ptr = pool.utf8(sourcefile);
+		self.attrs.put("SourceFile".into(), AttrEnum::Dyn(Box::new(ConstAttr(ptr))), pool);
+	}
+	
+	fn visit_source_debug_extension(&mut self, debug_extension: Bytes) {
+		let pool = &mut *self.constant_pool.borrow_mut();
+		self.attrs.put("SourceDebugExtension".into(), AttrEnum::Dyn(Box::new(BytesAttr(debug_extension))), pool);
+	}
+	
+	fn visit_deprecated(&mut self) {
+		let pool = &mut *self.constant_pool.borrow_mut();
+		self.attrs.put("Deprecated".into(), AttrEnum::Dyn(Box::new(EmptyAttr())), pool);
+	}
 }
 
 impl MethodVisitor for Rc<RefCell<MethodWriter>> {
@@ -337,9 +408,53 @@ impl MethodVisitor for Rc<RefCell<MethodWriter>> {
 	fn visit_code(&mut self) -> Option<Self::CodeVisitorType> {
 		self.borrow_mut().visit_code()
 	}
+	
+	fn visit_signature(&mut self, sig: String) {
+		self.borrow_mut().visit_signature(sig);
+	}
+	
+	fn visit_exceptions(&mut self, exceptions: Vec<ClassRef>) {
+		self.borrow_mut().visit_exceptions(exceptions);
+	}
 }
 impl FieldVisitor for Rc<RefCell<FieldWriter>> {
+	fn visit_constant_value(&mut self, val: JFieldConst) {
+		self.borrow_mut().visit_constant_value(val);
+	}
 	
+	fn visit_signature(&mut self, sig: String) {
+		self.borrow_mut().visit_signature(sig);
+	}
+}
+
+struct ConstAttr(u16);
+struct BytesAttr(Bytes);
+struct EnclosingMethodAttr(u16, u16);
+struct EmptyAttr();
+
+impl Attribute for ConstAttr {
+	fn serialize(&self, bytes: &mut BytesMut) {
+		bytes.put_u16(self.0);
+	}
+}
+
+impl Attribute for BytesAttr {
+	fn serialize(&self, bytes: &mut BytesMut) {
+		bytes.put(self.0.clone());
+	}
+}
+
+impl Attribute for EnclosingMethodAttr {
+	fn serialize(&self, bytes: &mut BytesMut) {
+		bytes.put_u16(self.0);
+		bytes.put_u16(self.1);
+	}
+}
+
+impl Attribute for EmptyAttr {
+	fn serialize(&self, _bytes: &mut BytesMut) {
+		
+	}
 }
 
 impl Serialize for ClassWriter {
@@ -384,6 +499,9 @@ impl ClassWriter {
 		}
 		let mut attrs = AttributePool::new();
 		attrs.put("BootstrapMethods".into(), AttrEnum::Dyn(Box::new(bootstrap_pool)), &mut cpool);
+		if access.a_synthetic {
+			attrs.put("Synthetic".into(), AttrEnum::Dyn(Box::new(EmptyAttr())), &mut cpool);
+		}
 		
 		ClassWriter {
 			access, name, superclass, interfaces: ifaces, major, minor,
@@ -413,7 +531,22 @@ impl FieldWriter {
 }
 
 impl FieldVisitor for FieldWriter {
+	fn visit_signature(&mut self, sig: String) {
+		let pool = &mut *self.constant_pool.borrow_mut();
+		self.attrs.put("Signature".into(), AttrEnum::Dyn(Box::new(ConstAttr(pool.utf8(sig)))), pool);
+	}
 	
+	fn visit_constant_value(&mut self, value: JFieldConst) {
+		let pool = &mut *self.constant_pool.borrow_mut();
+		let ptr = match value {
+			JFieldConst::Int(i) => pool.int_const(i),
+			JFieldConst::Long(l) => pool.long_const(l),
+			JFieldConst::Float(f) => pool.float_const(f),
+			JFieldConst::Double(d) => pool.double_const(d),
+			JFieldConst::Str(s) => pool.string_const(s)
+		};
+		self.attrs.put("ConstantValue".into(), AttrEnum::Dyn(Box::new(ConstAttr(ptr))), pool);
+	}
 }
 
 enum ProcessedOpcode {
